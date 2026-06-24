@@ -1,0 +1,28 @@
+// Kastle Vault v1 — Covenant++ (KIP-17 / SilverScript) vault redeem script.
+//
+// A P2SH redeem script with TWO spend paths, selected at spend time:
+//
+//   clawback — owner-signed, available at ANY time (the pre-delay escape
+//              hatch: the owner can pull funds back before the timelock
+//              matures).
+//   withdraw — no signature, but only valid once the UTXO has aged past
+//              `delay` relative blocks AND output[0] pays the fixed recovery
+//              scriptPubKey. This is the time-delayed move-to-recovery path.
+//
+// The ONLY varying inputs are the three constructor parameters:
+//   owner       — 32-byte x-only schnorr pubkey of the vault owner
+//   recoverySpk — the fixed recovery target scriptPubKey (committed bytes)
+//   delay       — relative timelock in DAA/sequence units (see Delay enum)
+//
+// Everything else is constant, so {owner, recoverySpk, delay} fully determine
+// the redeem bytes and therefore the P2SH address (ADR-005 seed-completeness).
+contract KastleVaultV1(pubkey owner, byte[] recoverySpk, int delay) {
+    entrypoint function clawback(sig ownerSig) {
+        require(checkSig(ownerSig, owner));
+    }
+
+    entrypoint function withdraw() {
+        require(this.age >= delay);
+        require(tx.outputs[0].scriptPubKey == recoverySpk);
+    }
+}
