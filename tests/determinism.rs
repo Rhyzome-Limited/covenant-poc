@@ -11,8 +11,8 @@ use std::process::Command;
 
 fn vault_from_seed(seed: &[u8]) -> String {
     let params = VaultParams {
-        owner_pubkey: derive_owner_pubkey(seed, 0, 0),
-        recovery_address: derive_recovery_address(seed, 0),
+        owner_pubkey: derive_owner_pubkey(seed, 0, 0).unwrap(),
+        recovery_address: derive_recovery_address(seed, 0, 0).unwrap(),
         delay: Delay::D7,
     };
     p2sh_address(&build_redeem_script(&params))
@@ -37,11 +37,20 @@ fn script_and_address_are_deterministic() {
 
 #[test]
 fn cold_rederivation_matches() {
-    let seed = b"seed-completeness";
+    let seed = b"seed-complete!00";
     assert_eq!(
         vault_from_seed(seed),
         vault_from_seed(seed),
         "cold re-derivation from the same seed must reproduce the same vault"
+    );
+
+    // Real BIP-32 outputs: a 32-byte x-only owner key and a Testnet address.
+    let owner = derive_owner_pubkey(seed, 0, 0).unwrap();
+    assert_eq!(owner.len(), 32, "owner pubkey must be a 32-byte x-only key");
+    let recovery = derive_recovery_address(seed, 0, 0).unwrap();
+    assert!(
+        recovery.starts_with("kaspatest:"),
+        "recovery must be a Testnet address, got: {recovery:?}"
     );
 }
 
@@ -93,7 +102,7 @@ fn subprocess_address_is_deterministic() {
     let bin = env!("CARGO_BIN_EXE_covenant-poc");
     let run = || {
         let out = Command::new(bin)
-            .args(["--seed", "cross-process"])
+            .args(["--seed", "cross-process!00"])
             .output()
             .expect("binary must run");
         assert!(out.status.success(), "binary must exit 0");
