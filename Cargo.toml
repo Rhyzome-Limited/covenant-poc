@@ -15,6 +15,8 @@ silverscript-lang = { git = "https://github.com/kaspanet/silverscript", rev = "f
 # rusty-kaspa v2.0.1 — canonical Kaspa P2SH construction + bech32 address encode.
 kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
 kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
+# BIP-32 HD derivation: master from seed → m/44'/111111'/<account>'/0/<index>.
+kaspa-bip32 = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
 # Normalize a stub owner key to the 32-byte schnorr width the compiler requires.
 blake2b_simd = "1.0"
 
