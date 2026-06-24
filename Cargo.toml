@@ -1,0 +1,8 @@
+[package]
+name = "covenant-poc"
+version = "0.0.0"
+edition = "2021"
+
+# ponytail: zero external deps — std DefaultHasher (fixed seed) is enough for
+# deterministic stubs. Add blake2/rusty-kaspa when real SilverScript lands.
+[dependencies]

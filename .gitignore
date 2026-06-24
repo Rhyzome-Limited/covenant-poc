@@ -1,0 +1,5 @@
+/target
+
+# build-loop manifests must stay untracked
+work/manifests/
+*.local.yaml
