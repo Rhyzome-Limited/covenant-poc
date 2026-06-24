@@ -1,0 +1,11 @@
+// Trivial SilverScript P2SH redeem-script template.
+//
+// `require(true)` is the anyone-can-spend (OP_TRUE-equivalent) redeem script a
+// P2SH output commits to — the minimal case with NO signer and therefore NO
+// per-vault varying bytes. The real Vault template (owner pubkey + recovery +
+// delay) lands in a later ticket; this only proves the compiler is wired.
+contract Trivial() {
+    entrypoint function main() {
+        require(true);
+    }
+}

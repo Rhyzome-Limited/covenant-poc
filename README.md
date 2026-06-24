@@ -29,4 +29,21 @@ KIP-17/SilverScript logic and BIP-32 derivation arrive in later tickets.
 On-chain **TN10** steps are performed **manually** in later tickets — this
 scaffold builds and passes CI with no network or chain access.
 
+## Toolchain
+
+The real KIP-17/SilverScript logic compiles `.sil` templates with the
+**SilverScript compiler** and computes Kaspa P2SH with **rusty-kaspa**. Both are
+git-only deps (no crates.io), pinned in `tools/sil-compile-check/Cargo.toml`:
+
+| Tool | Repo | Compiler binary | Pinned version |
+|------|------|-----------------|----------------|
+| SilverScript | [kaspanet/silverscript](https://github.com/kaspanet/silverscript) | `silverc` (crate `silverscript-lang`) | commit `faaa074` (2026-06-16) |
+| rusty-kaspa | [kaspanet/rusty-kaspa](https://github.com/kaspanet/rusty-kaspa) | — (library) | tag `v2.0.1` (2026-06-15) |
+
+`tools/sil-compile-check` is a probe crate: its test compiles a trivial `.sil`
+(`examples/trivial.sil`) via `silverscript-lang` and asserts the redeem script is
+non-empty and yields a 32-byte Kaspa P2SH script hash (`blake2b-256`, computed
+with rusty-kaspa v2.0.1). It keeps the root crate zero-dep and runs in CI with no
+secrets, no TN10, and no RPC access.
+
 **Status: scaffold**

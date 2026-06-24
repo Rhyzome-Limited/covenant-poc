@@ -1,0 +1,23 @@
+# Toolchain probe crate: proves the SilverScript compiler + rusty-kaspa v2.0.1
+# are wired and that a trivial .sil compiles to a real redeem script + P2SH.
+# Kept out of the zero-dep root crate on purpose — these are heavy git deps.
+[package]
+name = "sil-compile-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# SilverScript compiler (kaspanet/silverscript). Pinned to an exact commit;
+# this crate brings its own rusty-kaspa pin (branch tn12) transitively. We only
+# consume `CompiledContract.script` (plain bytes) from it, so that pin never has
+# to agree with ours below — the boundary is Vec<u8>, not shared types.
+silverscript-lang = { git = "https://github.com/kaspanet/silverscript", rev = "faaa074915edd1e885e4dd552051e348d1854c87" }
+
+# rusty-kaspa v2.0.1 — the version the POC pins. Used for the canonical Kaspa
+# pay-to-script-hash construction (blake2b-256, 32-byte script hash).
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
+
+# Independent recomputation of the P2SH script hash in the test (same algorithm
+# rusty-kaspa uses, computed a second way to prove the commitment).
+blake2b_simd = "1.0"

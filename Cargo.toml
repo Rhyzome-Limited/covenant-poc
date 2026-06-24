@@ -6,3 +6,10 @@ edition = "2021"
 # ponytail: zero external deps — std DefaultHasher (fixed seed) is enough for
 # deterministic stubs. Add blake2/rusty-kaspa when real SilverScript lands.
 [dependencies]
+
+# The toolchain probe (SilverScript + rusty-kaspa v2.0.1) lives in its own crate
+# so the root stays zero-dep. default-members lists both so CI's bare
+# `cargo build`/`cargo test` (no --workspace flag) build and test both.
+[workspace]
+members = ["tools/sil-compile-check"]
+default-members = [".", "tools/sil-compile-check"]
