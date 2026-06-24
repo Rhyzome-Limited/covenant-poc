@@ -874,6 +874,12 @@ dependencies = [
 [[package]]
 name = "covenant-poc"
 version = "0.0.0"
+dependencies = [
+ "blake2b_simd",
+ "kaspa-addresses 2.0.1",
+ "kaspa-txscript 2.0.1",
+ "silverscript-lang",
+]
 
 [[package]]
 name = "cpufeatures"
