@@ -1,0 +1,234 @@
+# ============================================================================
+# covenant-poc.yaml — claude-build-loop manifest
+# Place at: covenant-poc/work/manifests/covenant-poc.yaml  (gitignored, untracked)
+# Gate: GitHub Actions PR checks (the repo's ci.yml) — polled via `rtk gh pr checks`
+# Branches: cvpoc/<Tn> -> integration branch cvpoc-integration -> base main
+#
+# GOAL: Prove a Kaspa Covenant++ (KIP-17 / SilverScript) "Vault" — time-delayed
+#       withdrawal + clawback — can be built from a FIXED template whose only
+#       varying inputs are {owner pubkey, recovery address, delay}, ALL
+#       seed-derivable or enumerable, such that the vault is recoverable from the
+#       SEED ALONE (no backend, no indexer). Authority: ADR-005.
+#
+# RUN MODE per ticket:
+#   loop          = full claude-build-loop (plan -> review -> implement -> gate -> diff-review)
+#   direct        = direct implementation (skip plan/review), still gated + diff-reviewed
+#   human_gate    = STOPS the loop; a human performs on-chain TN10 ops and records results
+#
+# The loop runs T1->T3 autonomously. It MUST halt at T4 (human_gate) and not proceed.
+# T4–T7 are documented here for completeness but are executed by Leo, not the loop.
+# ============================================================================
+
+feature: covenant-poc
+base_branch: main
+integration_branch: cvpoc-integration
+branch_prefix: cvpoc        # branches: cvpoc/T1, cvpoc/T2, ...
+
+# ---- loop tuning (per Build-Loop Lessons on this repo) ----
+config:
+  plan_review_rounds: 2
+  gate_fix_attempts: 2
+  implement_review_cycles: 3
+  claude_max_turns_implement: 30      # template/derive tickets create files+tests; default 15 too low
+  batch_on_single_branch: false       # tickets are a strict chain; sequential merges
+  halt_on_human_gate: true            # MUST stop at the first human_gate ticket
+
+# ---- invariants enforced on EVERY ticket (DeepSeek review checks these) ----
+invariants:
+  - "Determinism is sacred: same {owner pubkey, recovery address, delay} MUST always produce the
+     identical redeem script bytes and identical P2SH address, across separate processes.
+     tests/determinism.rs must remain present and must not be weakened."
+  - "Seed-completeness: the ONLY per-vault varying inputs to the template are owner pubkey,
+     recovery address, and delay. No nonce, salt, timestamp, RNG, or environment-derived byte may
+     enter the script. Introducing any such byte is a FAILURE to be reported, never worked around."
+  - "Delay is enumerable: the delay comes from the fixed Delay enum {D1,D3,D7,D30,D90}. No
+     free-form/unbounded delay value anywhere in template or derive."
+  - "No network/chain access in CI: ci.yml must pass with no secrets, no TN10, no RPC. Any on-chain
+     code must be behind a feature flag or a separate binary that CI does not run."
+  - "Gate is clean-env: a green result is unverified until CI re-runs it in a fresh process.
+     Never assert behaviour the test itself defines (no maker-writes-its-own-fixture tautologies)."
+  - "Scope: edit only files the ticket names. No repo-wide lint/format edits to unrelated files."
+
+# ---- global definition of done ----
+global_dod:
+  - "cargo fmt --check, cargo clippy -- -D warnings, cargo build, cargo test all green in CI."
+  - "All loop tickets (T1–T3) squash-merged to cvpoc-integration with green PR checks."
+  - "Determinism + enumerable tests still pass after every ticket."
+
+tickets:
+
+  # ==========================================================================
+  - id: T1
+    title: "Toolchain — SilverScript compiler + rusty-kaspa v2.0.1 wired, trivial .sil compiles"
+    mode: loop
+    rationale: >
+      The POC needs the SilverScript toolchain and rusty-kaspa available to build real covenant
+      scripts in T2. This ticket only stands up the toolchain and proves it compiles a trivial
+      script — it does NOT replace the stubs yet. Confirm exact compiler binary + version.
+    allowed_paths:
+      - Cargo.toml
+      - "build.rs"                      # only if the silverscript toolchain needs a build hook
+      - ".github/workflows/ci.yml"
+      - "tools/**"                      # any vendored/pinned toolchain helper scripts
+      - "scripts/**"
+      - "README.md"
+    instructions: >
+      Add rusty-kaspa v2.0.1 as a dependency (pin exactly) and make the SilverScript compiler
+      available to the build (vendored binary, cargo dep, or a pinned install script under
+      tools/ or scripts/ — choose the simplest that CI can run hermetically). Add a trivial
+      throwaway SilverScript source (a pubkey-only P2SH) under tools/ or a fixtures dir, compile
+      it during a test or build step, and assert it produces a non-empty script + a P2SH hash.
+      Update ci.yml so the toolchain install/compile runs in CI WITHOUT network secrets (crates.io
+      + a pinned release download are acceptable; nothing requiring auth). Document the exact
+      compiler binary name and version in README under a "Toolchain" heading.
+    acceptance:
+      - "rusty-kaspa pinned to v2.0.1 in Cargo.toml; cargo build succeeds in CI."
+      - "A trivial .sil compiles in CI and yields a non-empty script + a P2SH hash (asserted by a test)."
+      - "CI requires no secrets and no TN10/RPC access."
+      - "README documents the SilverScript compiler binary + exact version used."
+      - "Existing determinism + enumerable tests still pass."
+    notes: >
+      If the SilverScript toolchain cannot be installed hermetically in GH Actions, STOP and report
+      (NEEDS-HUMAN) — do not fake the compile or stub the toolchain. The whole POC depends on a
+      real compiler being available.
+
+  # ==========================================================================
+  - id: T2
+    title: "Vault template — fixed redeem script with timelock + clawback (replaces template stub)"
+    mode: loop
+    depends_on: [T1]
+    rationale: >
+      The core artifact. Replace the deterministic STUB in src/template.rs with a real SilverScript
+      vault redeem script built from {owner pubkey, recovery address, delay}. Two spend paths in
+      ONE script: (a) withdrawal to the fixed recovery address allowed only after the relative
+      timelock; (b) owner-signed clawback that cancels a pending withdrawal. This is where the
+      ADR-005 thesis is first tested: timelock + clawback must compose WITHOUT introducing a
+      non-derivable byte.
+    allowed_paths:
+      - "src/template.rs"
+      - "tools/**"                      # the .sil template source + any helper
+      - "fixtures/**"
+      - "tests/determinism.rs"          # may EXTEND (not weaken) to cover the real template
+      - "README.md"
+    instructions: >
+      Author kastle-vault-v1 as a real SilverScript redeem script parameterised ONLY by owner
+      pubkey, recovery address, and an enumerable Delay. Use the KIP-17 relative-timelock /
+      introspection opcode(s) for the delay branch; cite the opcode in a code comment with its
+      KIP-17 reference. Implement build_redeem_script(&VaultParams) to emit this script's bytes
+      and p2sh_address() to compute the real P2SH from it (the real hash now replaces the
+      DefaultHasher stub). Keep the function signatures stable. Extend tests/determinism.rs so the
+      cross-process + cold-re-derivation assertions run against the REAL template.
+      CRITICAL: if expressing timelock+clawback requires any byte not derived from
+      {owner,recovery,delay} (a nonce, salt, ordering tag, per-vault randomness), DO NOT invent a
+      workaround — STOP and report exactly which construct forced it. That is the finding T7 needs.
+    acceptance:
+      - "build_redeem_script emits a real SilverScript vault script with both withdrawal (post-delay,
+         to fixed recovery addr) and clawback (owner-signed, pre-delay) paths."
+      - "The script's only varying inputs are owner pubkey, recovery address, delay (Delay enum)."
+      - "p2sh_address computes a real P2SH from the script; determinism tests pass cross-process."
+      - "No non-derivable byte in the script (or, if unavoidable, the ticket is reported NEEDS-HUMAN
+         with the specific cause — not merged green)."
+      - "cargo fmt/clippy/build/test green; determinism + enumerable tests pass."
+    notes: >
+      KIP-9 storage mass: keep the script and its eventual spend within storage-mass limits; note
+      headroom in a comment if measurable at this stage.
+
+  # ==========================================================================
+  - id: T3
+    title: "Seed-complete derivation — BIP-32 owner + recovery, enumerable delay (replaces derive stub)"
+    mode: loop
+    depends_on: [T2]
+    rationale: >
+      Replace the STUB in src/derive.rs with real BIP-32 derivation so a vault's owner key and
+      recovery address come from the seed, and prove the full offline round-trip: seed -> params
+      -> template -> P2SH, recomputed identically in a cold process. This is the offline half of
+      the ADR-005 custody guarantee (the on-chain half is T5, human-run).
+    allowed_paths:
+      - "src/derive.rs"
+      - "Cargo.toml"                    # may add a pinned BIP-32 / bip39 crate
+      - "tests/determinism.rs"          # extend to cover real derivation
+      - "src/main.rs"                   # CLI prints the real derived vault address
+      - "README.md"
+    instructions: >
+      Implement derive_owner_pubkey on path m/44'/111111'/<account>'/0/<index> and
+      derive_recovery_address from a defined seed path, using a pinned, audited BIP-32/BIP-39 crate
+      (prefer one already used in the Kaspa/rusty-kaspa ecosystem; pin exactly). enumerate_delays
+      stays the fixed 5-variant set. Wire main.rs to derive a vault from a hardcoded TEST seed and
+      print its P2SH address. Extend tests/determinism.rs with a cold-re-derivation test that:
+      derives params from the test seed in one code path, builds the script + address, then in an
+      INDEPENDENT path re-derives from the same seed phrase only and asserts byte-identical P2SH.
+    acceptance:
+      - "Owner pubkey + recovery address derive from a seed via BIP-32 on the documented Kaspa path."
+      - "Cold re-derivation (seed phrase only, no carried state) reproduces the identical P2SH."
+      - "enumerate_delays returns exactly {D1,D3,D7,D30,D90}."
+      - "CLI prints a real derived vault P2SH; cargo fmt/clippy/build/test green."
+    notes: >
+      Use a TEST seed only; never a real one. This is the last loop ticket — after T3 merges, the
+      loop must HALT (T4 is human_gate).
+
+  # ==========================================================================
+  - id: T4
+    title: "[HUMAN] Fund the vault on TN10 and confirm address match"
+    mode: human_gate
+    depends_on: [T3]
+    rationale: >
+      First on-chain step. The loop CANNOT do this (needs a funded TN10 key + live node). Leo funds
+      the computed P2SH on TN10 and confirms the funded address equals the offline-computed one —
+      the end-to-end determinism proof.
+    human_steps:
+      - "Provide TN10 RPC endpoint + a throwaway funded TN10 key (valueless test KAS only)."
+      - "Run the CLI to compute the vault P2SH from the test seed."
+      - "Fund that P2SH on TN10 from the funded key; record the funding tx id."
+      - "Confirm the address the funding tx paid to == the CLI-computed address."
+    acceptance:
+      - "On-chain funded address == offline-computed address (recorded with tx id)."
+    notes: "Throwaway key only. Record tx ids for T7."
+
+  # ==========================================================================
+  - id: T5
+    title: "[HUMAN] Cold seed-only recovery against TN10"
+    mode: human_gate
+    depends_on: [T4]
+    rationale: >
+      The ADR-005 custody guarantee, proven on-chain. From the seed ALONE — no backend, no
+      scanner, no stored mapping — enumerate {index x allowed-delays x recovery candidates},
+      recompute candidate P2SHs, and locate the funded UTXO via getUtxosByAddresses.
+    human_steps:
+      - "On a clean checkout with only the test seed, run the recovery routine (no stored state)."
+      - "Confirm the funded vault UTXO is found via getUtxosByAddresses on TN10."
+    acceptance:
+      - "Funded vault UTXO located from seed alone; no backend/scanner involved (recorded)."
+    notes: "This is the make-or-break for ADR-005's seed-sufficiency claim."
+
+  # ==========================================================================
+  - id: T6
+    title: "[HUMAN] Exercise both spend paths against the timelock on TN10"
+    mode: human_gate
+    depends_on: [T5]
+    rationale: >
+      Prove the timelock + clawback semantics on-chain: withdrawal blocked before the delay,
+      clawback succeeds before the delay, withdrawal succeeds after the delay.
+    human_steps:
+      - "Attempt withdrawal BEFORE delay elapses -> expect on-chain rejection (record)."
+      - "Perform clawback BEFORE delay -> expect success, UTXO spent (record tx id)."
+      - "Re-fund; let the delay elapse; withdrawal AFTER delay -> expect success to recovery addr (record tx id)."
+    acceptance:
+      - "Pre-delay withdrawal rejected; clawback succeeds; post-delay withdrawal succeeds. All tx ids recorded."
+    notes: "Confirm semantics match the Vault spec (ADR-004)."
+
+  # ==========================================================================
+  - id: T7
+    title: "[HUMAN] Findings — VAULT_POC_FINDINGS.md + feed-forward to kastle-vault-v1"
+    mode: human_gate
+    depends_on: [T6]
+    rationale: >
+      Capture the verdict and translate it into the engine-design decision and the CI recovery test.
+    human_steps:
+      - "Write VAULT_POC_FINDINGS.md with: verdict (do timelock+clawback compose AND stay seed-complete?);
+         the final .sil template (commented); the seed->params->script->P2SH derivation + determinism proof;
+         TN10 tx ids (fund, pre-delay withdraw attempt, clawback, post-delay withdraw); any non-derivable byte
+         encountered (ADR-005 threshold trigger) or explicit 'none'; KIP-9 storage-mass headroom; feed-forward
+         to locking kastle-vault-v1 and shaping the CI recovery test."
+    acceptance:
+      - "VAULT_POC_FINDINGS.md complete; verdict unambiguous; every on-chain claim carries a tx id."
+    notes: "Feeds the [Research] SilverScript timelock+clawback task and unblocks engine design."

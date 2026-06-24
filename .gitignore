@@ -1,5 +1,6 @@
 /target
 
 # build-loop manifests must stay untracked
-work/manifests/
+work/
 *.local.yaml
+.DS_Store
