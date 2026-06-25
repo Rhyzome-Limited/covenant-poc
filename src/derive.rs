@@ -61,3 +61,19 @@ pub fn derive_recovery_address(seed: &[u8], account: u32, index: u32) -> Result<
 pub fn enumerate_delays() -> Vec<Delay> {
     vec![Delay::D1, Delay::D3, Delay::D7, Delay::D30, Delay::D90]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The production delay set is EXACTLY the five presets — never more. Guards
+    /// against the test-only Delay::T6Test (or any future arm) leaking into the
+    /// enumerable set users pick from. Holds even when `test-delay` is enabled.
+    #[test]
+    fn enumerate_delays_is_exactly_the_five() {
+        assert_eq!(
+            enumerate_delays(),
+            vec![Delay::D1, Delay::D3, Delay::D7, Delay::D30, Delay::D90]
+        );
+    }
+}

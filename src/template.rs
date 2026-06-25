@@ -27,20 +27,36 @@ pub enum Delay {
     D7,
     D30,
     D90,
+    /// TEST ONLY — 60 s window for on-chain T6; never expose in production enum/UI.
+    /// Gated behind the `test-delay` feature so it cannot exist in a shipped build,
+    /// and deliberately excluded from `enumerate_delays()`.
+    #[cfg(feature = "test-delay")]
+    T6Test,
 }
 
 impl Delay {
-    /// Relative timelock in DAA/sequence units committed into the script.
+    /// Relative timelock committed into the script, in DAA-score units.
     ///
-    /// One unit ≈ one second of DAA score; the values are the canonical
-    /// TN10 counts for 1/3/7/30/90 days used across the POC.
+    /// `this.age` lowers to `OpCheckSequenceVerify`, whose operand consensus
+    /// reads as a relative lock "expressed in blocks" against the input's
+    /// `block_daa_score` (rusty-kaspa v2.0.1
+    /// consensus/src/processes/transaction_validator/tx_validation_in_utxo_context.rs:143-155).
+    /// One unit = one DAA-score increment ≈ one block. On the target network
+    /// TN10 the block rate is 10 BPS post-Crescendo (params.rs:716
+    /// `BlockrateParams::new::<10>()`), so 1 block ≈ 0.1 s and
+    /// 1 day = 86_400 s × 10 = 864_000 units. Magnitudes below are
+    /// days × 864_000.
     pub fn relative_units(&self) -> i64 {
+        const PER_DAY: i64 = 864_000; // 86_400 s/day × 10 BPS (TN10 post-Crescendo)
         match self {
-            Delay::D1 => 86,
-            Delay::D3 => 259,
-            Delay::D7 => 604,
-            Delay::D30 => 2592,
-            Delay::D90 => 7776,
+            Delay::D1 => PER_DAY,
+            Delay::D3 => 3 * PER_DAY,
+            Delay::D7 => 7 * PER_DAY,
+            Delay::D30 => 30 * PER_DAY,
+            Delay::D90 => 90 * PER_DAY,
+            // TEST ONLY — 60 s at 10 BPS; never reachable in a shipped build.
+            #[cfg(feature = "test-delay")]
+            Delay::T6Test => 600,
         }
     }
 }
@@ -100,4 +116,31 @@ pub fn p2sh_address(redeem_script: &[u8]) -> String {
     let spk = pay_to_script_hash_script(redeem_script);
     let hash = &spk.script()[2..34];
     Address::new(Prefix::Testnet, Version::ScriptHash, hash).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each preset must enforce its true day window. Expected values are LITERAL
+    /// hardcoded DAA-unit counts (days × 864_000 at 10 BPS) — deliberately NOT
+    /// recomputed from relative_units() or re-derived as days×864_000 inline. A
+    /// test that recomputes the code's own formula proves nothing; these literals
+    /// are the independent oracle.
+    #[test]
+    fn delay_units_are_real_day_windows() {
+        assert_eq!(Delay::D1.relative_units(), 864_000);
+        assert_eq!(Delay::D3.relative_units(), 2_592_000);
+        assert_eq!(Delay::D7.relative_units(), 6_048_000);
+        assert_eq!(Delay::D30.relative_units(), 25_920_000);
+        assert_eq!(Delay::D90.relative_units(), 77_760_000);
+    }
+
+    /// TEST ONLY delay enforces a 60 s on-chain window (600 units at 10 BPS).
+    /// Literal expected value, same oracle rule as above.
+    #[cfg(feature = "test-delay")]
+    #[test]
+    fn test_only_delay_is_sixty_seconds() {
+        assert_eq!(Delay::T6Test.relative_units(), 600);
+    }
 }
