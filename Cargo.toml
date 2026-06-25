@@ -1,0 +1,28 @@
+[package]
+name = "covenant-poc"
+version = "0.0.0"
+edition = "2021"
+
+# Version duality, on purpose: silverscript-lang (rev faaa074) pulls its OWN
+# rusty-kaspa pin (branch tn12) transitively, while the root pins rusty-kaspa
+# v2.0.1 directly. Cargo treats the two git sources as distinct packages, so the
+# pins never have to agree — the boundary we cross is plain bytes (Vec<u8> /
+# Expr), never a shared rusty-kaspa type. Same split the tools/sil-compile-check
+# probe already relies on.
+[dependencies]
+# SilverScript compiler — compiles fixtures/kastle-vault-v1.sil to redeem bytes.
+silverscript-lang = { git = "https://github.com/kaspanet/silverscript", rev = "faaa074915edd1e885e4dd552051e348d1854c87" }
+# rusty-kaspa v2.0.1 — canonical Kaspa P2SH construction + bech32 address encode.
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
+# BIP-32 HD derivation: master from seed → m/44'/111111'/<account>'/0/<index>.
+kaspa-bip32 = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
+# Normalize a stub owner key to the 32-byte schnorr width the compiler requires.
+blake2b_simd = "1.0"
+
+# The toolchain probe (SilverScript + rusty-kaspa v2.0.1) lives in its own crate
+# so the root stays zero-dep. default-members lists both so CI's bare
+# `cargo build`/`cargo test` (no --workspace flag) build and test both.
+[workspace]
+members = ["tools/sil-compile-check"]
+default-members = [".", "tools/sil-compile-check"]
