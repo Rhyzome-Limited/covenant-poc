@@ -49,6 +49,13 @@ pub fn derive_owner_pubkey(seed: &[u8], account: u32, index: u32) -> Result<Vec<
     Ok(xonly(&derive_child(seed, account, index)?).to_vec())
 }
 
+/// TEST/HARNESS ONLY — the 32-byte secret for a derived child, needed by the
+/// on-chain T6 harness to sign the owner's clawback spend. Never call this from
+/// shipped flows; the seed must never leave the recovery boundary in production.
+pub fn derive_owner_privkey(seed: &[u8], account: u32, index: u32) -> Result<[u8; 32], Error> {
+    Ok(derive_child(seed, account, index)?.secret_bytes())
+}
+
 /// Derive the recovery address on path `m/44'/111111'/<account>'/0/<index>`.
 ///
 /// Returns a Testnet bech32 `PubKey` address over the same x-only key.
