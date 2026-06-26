@@ -20,9 +20,13 @@ fn vault_from_seed(seed: &[u8]) -> String {
 
 #[test]
 fn script_and_address_are_deterministic() {
+    // Real recovery address: the fix derives recoverySpk via pay_to_address_script,
+    // which requires a valid kaspa address (a fake "kaspatest:rec" string no longer
+    // decodes).
+    let rec = derive_recovery_address(b"det-test-seed!01", 0, 0).unwrap();
     let mk = || VaultParams {
         owner_pubkey: vec![1, 2, 3],
-        recovery_address: "kaspatest:rec".to_string(),
+        recovery_address: rec.clone(),
         delay: Delay::D30,
     };
     let s1 = build_redeem_script(&mk());
@@ -56,9 +60,13 @@ fn cold_rederivation_matches() {
 
 #[test]
 fn varying_one_input_changes_the_script() {
+    // Real, distinct recovery addresses (see note in the deterministic test):
+    // recoverySpk is now derived from the address, so each must be valid.
+    let rec_a = derive_recovery_address(b"vary-test-seed!a", 0, 0).unwrap();
+    let rec_b = derive_recovery_address(b"vary-test-seed!b", 0, 0).unwrap();
     let base = || VaultParams {
         owner_pubkey: vec![1, 2, 3],
-        recovery_address: "kaspatest:rec".to_string(),
+        recovery_address: rec_a.clone(),
         delay: Delay::D7,
     };
     let baseline = build_redeem_script(&base());
@@ -74,7 +82,7 @@ fn varying_one_input_changes_the_script() {
     );
 
     let other_recovery = VaultParams {
-        recovery_address: "kaspatest:other".to_string(),
+        recovery_address: rec_b.clone(),
         ..base()
     };
     assert_ne!(
