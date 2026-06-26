@@ -8,7 +8,7 @@
 
 use blake2b_simd::Params;
 use kaspa_addresses::{Address, Prefix, Version};
-use kaspa_txscript::pay_to_script_hash_script;
+use kaspa_txscript::{pay_to_address_script, pay_to_script_hash_script};
 use silverscript_lang::ast::Expr;
 use silverscript_lang::compiler::{compile_contract, CompileOptions};
 
@@ -92,13 +92,29 @@ pub fn build_redeem_script(p: &VaultParams) -> Vec<u8> {
             .to_vec()
     };
 
+    // recoverySpk must equal the bytes a real tx output paying the recovery
+    // address carries, as the withdraw branch compares
+    // `tx.outputs[0].scriptPubKey == recoverySpk`. That comparison (OpTxOutputSpk)
+    // pushes the FULL ScriptPublicKey serialization — version as big-endian u16
+    // followed by the locking script (work/rk/crypto/txscript/src/lib.rs:945-951).
+    // So we reproduce exactly that: convert the address to its real SPK via the
+    // consensus conversion pay_to_address_script (kaspa_txscript::standard,
+    // rusty-kaspa v2.0.1 crypto/txscript/src/standard.rs:41), then serialize
+    // version||script. The prior code committed the address-STRING bytes, which
+    // a real output never carries, so the equality could never hold and the
+    // withdraw-to-recovery path was unspendable.
+    // Deterministic: address→SPK is a pure function, so recovery_address stays
+    // the ONLY varying input and seed-completeness is preserved (ADR-005).
+    let recovery_addr = Address::try_from(p.recovery_address.as_str())
+        .expect("recovery address must be a valid kaspa address");
+    let recovery_spk = pay_to_address_script(&recovery_addr);
+    let mut recovery_spk_bytes = recovery_spk.version.to_be_bytes().to_vec();
+    recovery_spk_bytes.extend_from_slice(recovery_spk.script());
+
     // Constructor args, IN PARAMETER ORDER: (owner, recoverySpk, delay).
-    // recoverySpk is the fixed recovery target committed as opaque bytes — the
-    // address's own bytes, so no valid-bech32 round-trip is required and every
-    // committed byte is derivable from recovery_address.
     let args: Vec<Expr> = vec![
         owner32.into(),
-        p.recovery_address.as_bytes().to_vec().into(),
+        recovery_spk_bytes.into(),
         p.delay.relative_units().into(),
     ];
 
