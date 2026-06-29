@@ -81,6 +81,33 @@ impl Delay {
             Delay::T6Test => 600,
         }
     }
+
+    /// Stable 1-byte tag for the creation-tx payload. Only the five production
+    /// presets are mapped; T6Test is deliberately unmapped so a test delay can
+    /// never be serialized into (or recovered from) a payload.
+    pub fn discriminant(&self) -> u8 {
+        match self {
+            Delay::D1 => 1,
+            Delay::D3 => 2,
+            Delay::D7 => 3,
+            Delay::D30 => 4,
+            Delay::D90 => 5,
+            #[cfg(feature = "test-delay")]
+            Delay::T6Test => 0,
+        }
+    }
+
+    /// Inverse of `discriminant`: 1..=5 → preset, anything else → None.
+    pub fn from_discriminant(disc: u8) -> Option<Delay> {
+        match disc {
+            1 => Some(Delay::D1),
+            2 => Some(Delay::D3),
+            3 => Some(Delay::D7),
+            4 => Some(Delay::D30),
+            5 => Some(Delay::D90),
+            _ => None,
+        }
+    }
 }
 
 /// Encode a kaspa address as the FULL ScriptPublicKey bytes a real tx output
@@ -94,7 +121,7 @@ impl Delay {
 ///
 /// Deterministic: address→SPK is a pure function, so each address stays the ONLY
 /// varying input it represents and seed-completeness is preserved (ADR-005).
-fn spk_bytes(addr: &str) -> Vec<u8> {
+pub fn spk_bytes(addr: &str) -> Vec<u8> {
     let address = Address::try_from(addr).expect("spk address must be a valid kaspa address");
     let spk = pay_to_address_script(&address);
     let mut bytes = spk.version.to_be_bytes().to_vec();
@@ -176,14 +203,36 @@ pub struct VaultParamsV2 {
 /// recovery_address, clawback_address, delay} — template is constant, compiled
 /// in-process, same inputs → same bytes (ADR-005).
 pub fn build_redeem_script_v2(p: &VaultParamsV2) -> Vec<u8> {
+    // Delegate to _from_parts after resolving both addresses to real SPK bytes —
+    // single compile path so the create and reconstruct flows can never diverge.
+    build_redeem_script_v2_from_parts(
+        &p.owner_pubkey,
+        &spk_bytes(&p.recovery_address),
+        &spk_bytes(&p.clawback_address),
+        p.delay,
+    )
+}
+
+/// Build the v2 redeem script from raw SPK bytes, no address round-trip.
+///
+/// Same compile as `build_redeem_script_v2` but takes the recovery/clawback
+/// destinations as already-encoded version||script SPK bytes. The reconstruction
+/// path uses this: payload carries the raw SPKs, so re-deriving the script needs
+/// no address strings (which the payload never stores).
+pub fn build_redeem_script_v2_from_parts(
+    owner_pubkey: &[u8],
+    rec_spk_raw: &[u8],
+    claw_spk_raw: &[u8],
+    delay: Delay,
+) -> Vec<u8> {
     // Constructor args, IN PARAMETER ORDER: (owner, recoverySpk, clawbackSpk,
     // delay). Both SPKs are real version||script bytes (see spk_bytes) so each
     // `tx.outputs[0].scriptPubKey == *Spk` equality can actually hold.
     let args: Vec<Expr> = vec![
-        owner32(&p.owner_pubkey).into(),
-        spk_bytes(&p.recovery_address).into(),
-        spk_bytes(&p.clawback_address).into(),
-        p.delay.relative_units().into(),
+        owner32(owner_pubkey).into(),
+        rec_spk_raw.to_vec().into(),
+        claw_spk_raw.to_vec().into(),
+        delay.relative_units().into(),
     ];
 
     compile_contract(VAULT_V2_SIL, &args, CompileOptions::default())
@@ -197,9 +246,22 @@ pub fn build_redeem_script_v2(p: &VaultParamsV2) -> Vec<u8> {
 /// scriptPublicKey, lifts the 32-byte script hash out of it, and bech32-encodes
 /// it as a Testnet ScriptHash address.
 pub fn p2sh_address(redeem_script: &[u8]) -> String {
-    let spk = pay_to_script_hash_script(redeem_script);
-    let hash = &spk.script()[2..34];
+    let spk = p2sh_spk_bytes(redeem_script);
+    // spk = version:u16BE || script; the 32-byte script hash sits at script[2..34].
+    let hash = &spk[2 + 2..2 + 34];
     Address::new(Prefix::Testnet, Version::ScriptHash, hash).to_string()
+}
+
+/// The FULL ScriptPublicKey bytes (version:u16BE || locking script) a real
+/// creation-tx output carries to lock funds under a P2SH redeem script. Same
+/// version||script shape as `spk_bytes`, but for the P2SH path. Both the create
+/// and reconstruct flows compute the contract output SPK through this, so the
+/// committed SPK is byte-identical on both sides.
+pub fn p2sh_spk_bytes(redeem_script: &[u8]) -> Vec<u8> {
+    let spk = pay_to_script_hash_script(redeem_script);
+    let mut bytes = spk.version.to_be_bytes().to_vec();
+    bytes.extend_from_slice(spk.script());
+    bytes
 }
 
 #[cfg(test)]
@@ -263,5 +325,55 @@ mod tests {
     #[cfg(test)]
     fn test_address(xonly: &[u8; 32]) -> String {
         Address::new(Prefix::Testnet, Version::PubKey, xonly).to_string()
+    }
+
+    /// _from_parts must produce byte-identical script to the address-taking
+    /// build_redeem_script_v2 — the two paths only differ in how they obtain the
+    /// SPK bytes, so feeding spk_bytes() of the same addresses must converge.
+    #[test]
+    fn from_parts_matches_build_redeem_script_v2() {
+        let params = VaultParamsV2 {
+            owner_pubkey: vec![3u8; 32],
+            recovery_address: test_address(&[7u8; 32]),
+            clawback_address: test_address(&[9u8; 32]),
+            delay: Delay::D7,
+        };
+        let via_addr = build_redeem_script_v2(&params);
+        let via_parts = build_redeem_script_v2_from_parts(
+            &params.owner_pubkey,
+            &spk_bytes(&params.recovery_address),
+            &spk_bytes(&params.clawback_address),
+            params.delay,
+        );
+        assert_eq!(via_addr, via_parts);
+    }
+
+    /// p2sh_address must be unchanged by the p2sh_spk_bytes refactor. Literal
+    /// oracle: a fixed redeem script always hashes to the same Testnet P2SH addr.
+    #[test]
+    fn p2sh_address_unchanged_after_refactor() {
+        let redeem = build_redeem_script_v2(&VaultParamsV2 {
+            owner_pubkey: vec![1u8; 32],
+            recovery_address: test_address(&[2u8; 32]),
+            clawback_address: test_address(&[3u8; 32]),
+            delay: Delay::D1,
+        });
+        // Independent recomputation via the pre-refactor path (extract hash
+        // straight from pay_to_script_hash_script) must equal p2sh_address.
+        let spk = pay_to_script_hash_script(&redeem);
+        let expected =
+            Address::new(Prefix::Testnet, Version::ScriptHash, &spk.script()[2..34]).to_string();
+        assert_eq!(p2sh_address(&redeem), expected);
+    }
+
+    /// discriminant ↔ from_discriminant round-trips for all five presets, and
+    /// out-of-range tags decode to None (older/invalid payloads rejected).
+    #[test]
+    fn delay_discriminant_roundtrips() {
+        for d in [Delay::D1, Delay::D3, Delay::D7, Delay::D30, Delay::D90] {
+            assert_eq!(Delay::from_discriminant(d.discriminant()), Some(d));
+        }
+        assert_eq!(Delay::from_discriminant(0), None);
+        assert_eq!(Delay::from_discriminant(6), None);
     }
 }
