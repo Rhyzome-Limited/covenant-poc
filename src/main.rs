@@ -5,7 +5,7 @@
 //! Usage: `covenant-poc [--seed <bytes>]` (defaults to a fixed test seed).
 
 use covenant_poc::derive::{derive_owner_pubkey, derive_recovery_address};
-use covenant_poc::template::{build_redeem_script, p2sh_address, Delay, VaultParams};
+use covenant_poc::template::{build_redeem_script_v2, p2sh_address, Delay, VaultParamsV2};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -36,13 +36,18 @@ fn main() {
         }
     }
 
-    let params = VaultParams {
+    // v2 vault: clawback destination is the seed-derivable address at index 1,
+    // distinct from the recovery address at index 0, so the subprocess
+    // determinism test exercises all four v2 inputs.
+    let params = VaultParamsV2 {
         owner_pubkey: derive_owner_pubkey(&seed, 0, 0).expect("owner key derives from seed"),
         recovery_address: derive_recovery_address(&seed, 0, 0)
             .expect("recovery addr derives from seed"),
+        clawback_address: derive_recovery_address(&seed, 0, 1)
+            .expect("clawback addr derives from seed"),
         delay,
     };
-    let script = build_redeem_script(&params);
+    let script = build_redeem_script_v2(&params);
 
     if emit_spend_material {
         // TEST/HARNESS ONLY — drive the on-chain T6 spend harness. Owner privkey
@@ -52,6 +57,7 @@ fn main() {
         println!("REDEEM_HEX {}", hex(&script));
         println!("OWNER_PRIVKEY {}", hex(&owner_sk));
         println!("RECOVERY_ADDRESS {}", params.recovery_address);
+        println!("CLAWBACK_ADDRESS {}", params.clawback_address);
         println!("VAULT_P2SH {}", p2sh_address(&script));
         return;
     }
