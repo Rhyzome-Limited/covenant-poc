@@ -19,6 +19,26 @@ const VAULT_SIL: &str = include_str!(concat!(
     "/fixtures/kastle-vault-v1.sil"
 ));
 
+/// The fixed v2 vault template — adds a destination-locked clawback. Only
+/// varying inputs are {owner, recoverySpk, clawbackSpk, delay}; everything else
+/// is constant, so the four still fully determine the redeem bytes (ADR-005).
+const VAULT_V2_SIL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/kastle-vault-v2.sil"
+));
+
+/// Relative timelock in DAA-score units for a `days`-long window at `bps`
+/// blocks/second.
+///
+/// One unit = one DAA-score increment ≈ one block; on a `bps`-BPS network
+/// 1 day = 86_400 s × bps blocks. The 86_400 here is seconds-per-day (a real
+/// physical constant), NOT the per-day unit count — that count is DERIVED from
+/// bps, so retargeting the BPS retargets every delay. Never hardcode the
+/// composed `864_000` constant inside a delay body; pass the BPS in.
+pub fn delay_daa_units(days: u32, bps: u32) -> i64 {
+    days as i64 * bps as i64 * 86_400
+}
+
 /// Enumerable, fixed set of withdrawal delays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Delay {
@@ -47,18 +67,39 @@ impl Delay {
     /// 1 day = 86_400 s × 10 = 864_000 units. Magnitudes below are
     /// days × 864_000.
     pub fn relative_units(&self) -> i64 {
-        const PER_DAY: i64 = 864_000; // 86_400 s/day × 10 BPS (TN10 post-Crescendo)
+        // TN10 post-Crescendo BPS; the per-day unit count is delay_daa_units's to
+        // derive, never a hardcoded 864_000 here.
+        const BPS: u32 = 10;
         match self {
-            Delay::D1 => PER_DAY,
-            Delay::D3 => 3 * PER_DAY,
-            Delay::D7 => 7 * PER_DAY,
-            Delay::D30 => 30 * PER_DAY,
-            Delay::D90 => 90 * PER_DAY,
+            Delay::D1 => delay_daa_units(1, BPS),
+            Delay::D3 => delay_daa_units(3, BPS),
+            Delay::D7 => delay_daa_units(7, BPS),
+            Delay::D30 => delay_daa_units(30, BPS),
+            Delay::D90 => delay_daa_units(90, BPS),
             // TEST ONLY — 60 s at 10 BPS; never reachable in a shipped build.
             #[cfg(feature = "test-delay")]
             Delay::T6Test => 600,
         }
     }
+}
+
+/// Encode a kaspa address as the FULL ScriptPublicKey bytes a real tx output
+/// carries: version as big-endian u16 followed by the locking script
+/// (work/rk/crypto/txscript/src/lib.rs:945-951). A script branch comparing
+/// `tx.outputs[i].scriptPubKey == someSpk` (OpTxOutputSpk) pushes exactly this,
+/// so any *_spk committed into the redeem script MUST be built this way — via
+/// the consensus conversion `pay_to_address_script` (rusty-kaspa v2.0.1
+/// crypto/txscript/src/standard.rs:41), NEVER the address-STRING bytes (which a
+/// real output never carries, so the equality could never hold — the T6 bug).
+///
+/// Deterministic: address→SPK is a pure function, so each address stays the ONLY
+/// varying input it represents and seed-completeness is preserved (ADR-005).
+fn spk_bytes(addr: &str) -> Vec<u8> {
+    let address = Address::try_from(addr).expect("spk address must be a valid kaspa address");
+    let spk = pay_to_address_script(&address);
+    let mut bytes = spk.version.to_be_bytes().to_vec();
+    bytes.extend_from_slice(spk.script());
+    bytes
 }
 
 /// The three varying inputs to the otherwise-fixed vault script template.
@@ -68,6 +109,25 @@ pub struct VaultParams {
     pub delay: Delay,
 }
 
+/// Normalize a candidate owner pubkey to the 32-byte x-only schnorr width the
+/// SilverScript compiler's `pubkey` constructor arg requires. Real derivation
+/// already yields 32 bytes (passed through); a shorter stub blob is hashed to 32
+/// deterministically. Drop once derive.rs always returns real 32-byte keys.
+// ponytail: normalize only when not already 32B, so real keys pass through.
+fn owner32(owner_pubkey: &[u8]) -> Vec<u8> {
+    if owner_pubkey.len() == 32 {
+        owner_pubkey.to_vec()
+    } else {
+        Params::new()
+            .hash_length(32)
+            .to_state()
+            .update(owner_pubkey)
+            .finalize()
+            .as_bytes()
+            .to_vec()
+    }
+}
+
 /// Build the vault redeem script by compiling the fixed SilverScript template
 /// with the three params bound as constructor arguments.
 ///
@@ -75,51 +135,59 @@ pub struct VaultParams {
 /// {owner_pubkey, recovery_address, delay} — the template is constant and
 /// compiled in-process, so same inputs → same bytes (ADR-005).
 pub fn build_redeem_script(p: &VaultParams) -> Vec<u8> {
-    // The compiler enforces a 32-byte `pubkey` constructor arg. Real derivation
-    // yields a 32-byte x-only schnorr key (used as-is); the current stub yields
-    // a shorter blob, so normalize it deterministically to 32 bytes. Drop this
-    // branch once derive.rs returns real 32-byte keys.
-    // ponytail: normalize only when not already 32B, so real keys pass through.
-    let owner32: Vec<u8> = if p.owner_pubkey.len() == 32 {
-        p.owner_pubkey.clone()
-    } else {
-        Params::new()
-            .hash_length(32)
-            .to_state()
-            .update(&p.owner_pubkey)
-            .finalize()
-            .as_bytes()
-            .to_vec()
-    };
-
-    // recoverySpk must equal the bytes a real tx output paying the recovery
-    // address carries, as the withdraw branch compares
-    // `tx.outputs[0].scriptPubKey == recoverySpk`. That comparison (OpTxOutputSpk)
-    // pushes the FULL ScriptPublicKey serialization — version as big-endian u16
-    // followed by the locking script (work/rk/crypto/txscript/src/lib.rs:945-951).
-    // So we reproduce exactly that: convert the address to its real SPK via the
-    // consensus conversion pay_to_address_script (kaspa_txscript::standard,
-    // rusty-kaspa v2.0.1 crypto/txscript/src/standard.rs:41), then serialize
-    // version||script. The prior code committed the address-STRING bytes, which
-    // a real output never carries, so the equality could never hold and the
-    // withdraw-to-recovery path was unspendable.
-    // Deterministic: address→SPK is a pure function, so recovery_address stays
-    // the ONLY varying input and seed-completeness is preserved (ADR-005).
-    let recovery_addr = Address::try_from(p.recovery_address.as_str())
-        .expect("recovery address must be a valid kaspa address");
-    let recovery_spk = pay_to_address_script(&recovery_addr);
-    let mut recovery_spk_bytes = recovery_spk.version.to_be_bytes().to_vec();
-    recovery_spk_bytes.extend_from_slice(recovery_spk.script());
-
     // Constructor args, IN PARAMETER ORDER: (owner, recoverySpk, delay).
+    // recoverySpk is the real version||script SPK (see spk_bytes) so the withdraw
+    // branch's `tx.outputs[0].scriptPubKey == recoverySpk` can actually hold.
     let args: Vec<Expr> = vec![
-        owner32.into(),
-        recovery_spk_bytes.into(),
+        owner32(&p.owner_pubkey).into(),
+        spk_bytes(&p.recovery_address).into(),
         p.delay.relative_units().into(),
     ];
 
     compile_contract(VAULT_SIL, &args, CompileOptions::default())
         .expect("fixed vault template must compile")
+        .script
+}
+
+/// The four varying inputs to the otherwise-fixed v2 vault script template.
+///
+/// v2 adds `clawback_address`: the clawback branch is now destination-locked,
+/// pinning output[0] to this address's SPK just as withdraw pins recovery. So a
+/// stolen owner key can only sweep funds back to the seed-derivable clawback
+/// destination, not to an attacker address.
+pub struct VaultParamsV2 {
+    pub owner_pubkey: Vec<u8>,
+    pub recovery_address: String,
+    pub clawback_address: String,
+    pub delay: Delay,
+}
+
+/// Build the v2 vault redeem script — destination-locked external clawback +
+/// recovery — by compiling the fixed v2 template with the four params bound as
+/// constructor arguments.
+///
+/// THREE BRANCHES: the script itself has TWO entrypoints (withdraw, clawback),
+/// each pinning output[0] to a fixed SPK. The "third branch" is NOT a script
+/// path — it's the creation transaction's own FEE output, which carries no
+/// covenant and is just the miner fee paid when the vault UTXO is created. Don't
+/// look for a third `entrypoint` in the .sil; there are only two.
+///
+/// Determinism: every byte is a pure function of {owner_pubkey,
+/// recovery_address, clawback_address, delay} — template is constant, compiled
+/// in-process, same inputs → same bytes (ADR-005).
+pub fn build_redeem_script_v2(p: &VaultParamsV2) -> Vec<u8> {
+    // Constructor args, IN PARAMETER ORDER: (owner, recoverySpk, clawbackSpk,
+    // delay). Both SPKs are real version||script bytes (see spk_bytes) so each
+    // `tx.outputs[0].scriptPubKey == *Spk` equality can actually hold.
+    let args: Vec<Expr> = vec![
+        owner32(&p.owner_pubkey).into(),
+        spk_bytes(&p.recovery_address).into(),
+        spk_bytes(&p.clawback_address).into(),
+        p.delay.relative_units().into(),
+    ];
+
+    compile_contract(VAULT_V2_SIL, &args, CompileOptions::default())
+        .expect("fixed v2 vault template must compile")
         .script
 }
 
@@ -158,5 +226,42 @@ mod tests {
     #[test]
     fn test_only_delay_is_sixty_seconds() {
         assert_eq!(Delay::T6Test.relative_units(), 600);
+    }
+
+    /// delay_daa_units derives the per-day count from BPS — it is NOT the
+    /// hardcoded 864_000 constant. Two literal oracles prove the derivation:
+    /// at 10 BPS one day = 864_000 units, at 1 BPS one day = 86_400 units. If the
+    /// body ever reverted to a hardcoded per-day constant the 1-BPS case fails.
+    #[test]
+    fn delay_daa_units_derives_per_day_from_bps() {
+        assert_eq!(delay_daa_units(1, 10), 864_000);
+        assert_eq!(delay_daa_units(1, 1), 86_400);
+    }
+
+    /// SPK-encoding guard (the T6 bug signature): spk_bytes must return the real
+    /// version||script ScriptPublicKey, whose length differs from the raw address
+    /// STRING. If the encoding ever regressed to address.as_bytes() these lengths
+    /// would match. Checked for BOTH the recovery and clawback destinations.
+    #[test]
+    fn spk_bytes_is_real_encoding_not_address_string() {
+        let rec = test_address(&[7u8; 32]);
+        let claw = test_address(&[9u8; 32]);
+        assert_ne!(
+            spk_bytes(&rec).len(),
+            rec.len(),
+            "recovery spk must be real version||script bytes, not the address string"
+        );
+        assert_ne!(
+            spk_bytes(&claw).len(),
+            claw.len(),
+            "clawback spk must be real version||script bytes, not the address string"
+        );
+    }
+
+    /// A valid Testnet PubKey address over a fixed 32-byte x-only key — gives the
+    /// SPK guard real, decodable addresses with no seed/derivation dependency.
+    #[cfg(test)]
+    fn test_address(xonly: &[u8; 32]) -> String {
+        Address::new(Prefix::Testnet, Version::PubKey, xonly).to_string()
     }
 }

@@ -1,0 +1,103 @@
+# V2 Seed-Theft Findings — kastle-vault-v2
+
+Tracks how each vault version constrains a **stolen-owner-key** attacker. The
+threat: an attacker who recovers the owner's signing key from the seed. What can
+they do with the vault UTXO?
+
+---
+
+## V1 (baseline) — clawback UNCONSTRAINED
+
+`fixtures/kastle-vault-v1.sil` clawback branch:
+
+```
+entrypoint function clawback(sig ownerSig) {
+    require(checkSig(ownerSig, owner));   // <-- only constraint
+}
+```
+
+**Finding:** the clawback path pins nothing about the output. A stolen owner key
+sweeps the entire vault to **any** attacker address, instantly, bypassing the
+delay. The time-delayed `withdraw` → recovery path is irrelevant to the attacker
+because they never need it. This is the gap V2 closes.
+
+(Recorded in commit `b22e02c`: "clawback unconstrained finding — gates v2 design".)
+
+## V2 — destination-locked clawback + recovery
+
+`fixtures/kastle-vault-v2.sil` adds a `byte[] clawbackSpk` constructor param and
+pins output[0] in the clawback branch, mirroring withdraw:
+
+```
+entrypoint function clawback(sig ownerSig) {
+    require(checkSig(ownerSig, owner));
+    require(tx.outputs[0].scriptPubKey == clawbackSpk);   // <-- destination lock
+}
+entrypoint function withdraw() {
+    require(this.age >= delay);
+    require(tx.outputs[0].scriptPubKey == recoverySpk);
+}
+```
+
+**Result:** a stolen owner key can clawback ONLY to the fixed, seed-derivable
+`clawbackSpk` destination — never to an attacker address. Theft of the signing
+key no longer means theft of funds; it means at worst a forced early move to a
+destination the legitimate owner controls.
+
+### Seed-completeness (ADR-005) preserved
+
+The four — and only four — varying inputs are
+`{owner_pubkey, recovery_address, clawback_address, delay}`. All are
+seed-derivable or enumerable; no nonce, salt, timestamp, or RNG enters the
+script. `spk_bytes()` is a pure address→SPK function, so the destinations stay
+fully determined by the seed.
+
+### Evidence
+
+- **Determinism (in-process + cross-process):**
+  `v2_external_clawback_is_deterministic` (byte-identical redeem + stable P2SH),
+  and the binary — which now builds v2 with clawback derived at index 1 — yields
+  the same P2SH across two independent processes:
+
+  ```
+  $ cargo run -q -- --seed cross-process!00   (x2)
+  kaspatest:pzf3tct0jkx06j4xqw986e8yetvz28ynwhd3lsujryc4g7u9pnrtcft3kzvc6
+  ```
+
+- **SPK-encoding guard (T6-bug signature):**
+  `spk_bytes_is_real_encoding_not_address_string` asserts
+  `spk_bytes(addr).len() != addr.len()` for BOTH recovery and clawback — proving
+  the committed bytes are the real `version || script` ScriptPublicKey, not the
+  address STRING (which a real output never carries, so the equality would never
+  hold).
+
+- **Delay BPS-derivation:** `delay_daa_units_derives_per_day_from_bps` asserts
+  `delay_daa_units(1, 10) == 864_000` AND `delay_daa_units(1, 1) == 86_400` —
+  literal oracles proving the per-day count is derived from BPS, not hardcoded.
+
+- **v1 not stranded:** `v1_still_builds` confirms the 3-input v1 builder still
+  compiles to a nonempty script + valid Testnet P2SH.
+
+- Full suite: `cargo test` → all pass; `cargo clippy --all-targets -- -D warnings`
+  clean.
+
+### "Three branches" clarification
+
+The redeem script has TWO script entrypoints (withdraw, clawback). The often-cited
+"three branches" counts the creation transaction's own FEE output as the third —
+that output carries no covenant and is just the miner fee paid when the vault UTXO
+is created. There is no third `entrypoint` in the `.sil`.
+
+---
+
+## V3 — TODO
+
+> Future work. Not implemented in this ticket.
+
+- _Threat / design TBD._
+
+## V4 — TODO
+
+> Future work. Not implemented in this ticket.
+
+- _Threat / design TBD._
