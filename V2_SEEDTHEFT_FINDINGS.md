@@ -90,6 +90,61 @@ is created. There is no third `entrypoint` in the `.sil`.
 
 ---
 
+## V2 — Marker output + creation payload (root-key-only reconstruction)
+
+### Problem
+
+A v2 vault can lock funds to recovery/clawback destinations that are **external** —
+not derivable from the owner root key. Seed-completeness (ADR-005) breaks here: a
+root-key-only scan enumerates only its own derived addresses, so it can never find
+a contract whose destinations live under different seeds. Without a server or
+indexer, the externally-addressed contract is unrecoverable.
+
+### Design
+
+The creation transaction leaves two breadcrumbs the root key can follow:
+
+1. **Marker output** → a root-key-derived address at `MARKER_INDEX = 49` (owner is
+   index 0, clawback index 1, marker index 49). A scan of root-key addresses finds
+   this output; its outpoint names the creation tx.
+2. **Data payload** → encodes `{version, delay_disc, rec_spk, claw_spk}`. The
+   external SPKs are stored RAW (version‖script), so reconstruction needs no
+   address strings.
+
+Creation tx (`build_creation_tx`) has three outputs: `[0]` contract P2SH (the vault
+UTXO), `[1]` marker (10_000 sompi to the root-key address), `[2]` fee (1_000_000 to
+recovery). Its id is a blake2b-256 commitment over all outputs + payload.
+
+Reconstruction (`reconstruct`): derive marker addr → scan node for its UTXO → fetch
+creation tx → require nonempty, parseable payload → decode params → re-derive owner
+(index 0) → rebuild redeem via `build_redeem_script_v2_from_parts` → **ASSERT** its
+`p2sh_spk_bytes` equals the on-chain contract output[0]. Both create and reconstruct
+compute the contract SPK through the SAME path (`p2sh_spk_bytes(build_redeem_script_v2*)`),
+so the committed SPK can never diverge.
+
+### Results
+
+- **E2E (external case):** owner, recovery, clawback derived from THREE different
+  seeds. `reconstructs_external_contract_from_root_key` builds the creation tx,
+  stores it in `MockNode`, recovers from the owner seed alone, and asserts the
+  rebuilt redeem script is byte-identical to `build_redeem_script_v2(&params)` and
+  the amount matches the funding.
+- **v1-compat / no-payload:** `v1_contract_with_empty_payload_is_not_recovered` —
+  a creation tx with an empty payload parses to `None` and `reconstruct` returns
+  `None` (no panic). Older contracts predate the payload scheme and are skipped, not
+  crashed on.
+- **Codec guards:** `payload_roundtrips_and_rejects_foreign_version` (round-trip +
+  foreign version → `None`), `truncated_payload_is_none` (bounds-checked cursor).
+- **Refactor equivalence:** `from_parts_matches_build_redeem_script_v2` and
+  `p2sh_address_unchanged_after_refactor` prove the delegation refactors are
+  behaviour-preserving; `delay_discriminant_roundtrips` covers the 1..=5 tag map
+  and rejects 0/6 (T6Test is deliberately unmapped).
+- **No new deps:** payload codec is hand-rolled length-prefix (no serde). Full
+  suite: `cargo test` → 20 pass; `cargo clippy --all-targets` (and `--features
+  test-delay`) clean.
+
+---
+
 ## V3 — TODO
 
 > Future work. Not implemented in this ticket.

@@ -14,6 +14,12 @@ use std::str::FromStr;
 /// branch (BIP-44 `change`), per the seed-completeness path convention.
 const COIN_TYPE: u32 = 111111;
 
+/// Address-index convention for the root-key-derived slots:
+/// index 0 = owner, index 1 = clawback, index 49 = creation-tx marker. The
+/// marker output pays here so a root-key-only scan can locate the creation tx of
+/// an externally-addressed contract (the marker is the only on-chain breadcrumb).
+pub const MARKER_INDEX: u32 = 49;
+
 /// What can go wrong turning a seed into key material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
