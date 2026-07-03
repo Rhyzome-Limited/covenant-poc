@@ -15,6 +15,25 @@ address, delay}`.
   delay}` vary. Determinism (same inputs → same bytes → same address) is the
   invariant later tickets must not break.
 
+## Findings (V1 → V4)
+
+The template evolved across four iterations; V3/V4 were exercised **on-chain**
+against the public **TestNet-10** wRPC endpoint. Full receipts — tx ids,
+rejection reasons, environment caveats — in
+[`V2_SEEDTHEFT_FINDINGS.md`](V2_SEEDTHEFT_FINDINGS.md).
+
+| Iter | Result |
+|------|--------|
+| **V1** baseline | Clawback path was **unconstrained** — an owner-signed clawback could pay any address. Recorded as the finding that gates V2. |
+| **V2** destination-lock | Clawback **and** withdraw destination-locked to the committed recovery/clawback SPKs; added a marker output + creation-tx payload so the vault is reconstructable from the **root key alone**. |
+| **V3** seed-only recovery *(on-chain)* | **PASS.** From the seed + a live node only: rediscover the idx-49 marker, fetch the creation payload from the **confirmed block** (byte-exact codec round-trip via `get_blocks` block-scan — no txindex), and rebuild the P2SH == the on-chain vault output. |
+| **V4** seed-theft *(on-chain)* | **PASS.** Attacker clawback to a non-committed address **REJECTED** (destination constraint, valid owner sig); pre-delay withdraw **REJECTED** (relative timelock); legitimate clawback to the committed address **ACCEPTED**. |
+
+**Net:** on live TestNet-10 the covenant enforces the committed destination — theft
+to an attacker address fails *even with a valid owner signature* — while the
+ADR-005 seed-completeness invariant holds: the vault is rediscovered, rebuilt, and
+spent from the seed alone. ADR-006 (destination-locked clawback) validated on-chain.
+
 ## Layers (both modules in one crate)
 
 - `template` — **REAL** now. `build_redeem_script` compiles the fixed
@@ -89,4 +108,4 @@ delay each change the script), and a **cross-process** subprocess run
 (`covenant-poc --seed <s>` twice → identical stdout) that proves no time/RNG/env
 byte leaks into the script.
 
-**Status: template real (T2); derive still stubbed**
+**Status: template real (T2); V2 destination-lock + V3/V4 on-chain validation complete (see [Findings](#findings-v1--v4)); derive still a deterministic stub (real BIP-32 pending)**
