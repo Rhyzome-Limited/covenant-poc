@@ -145,14 +145,101 @@ so the committed SPK can never diverge.
 
 ---
 
-## V3 — TODO
+## V3 — on-chain seed-only recovery (TESTNET-10)
 
-> Future work. Not implemented in this ticket.
+On-chain acceptance run, 2026-07-03. First real confirmed-block exercise (prior
+runs proved the mempool path only).
 
-- _Threat / design TBD._
+### Environment
+- **Endpoint:** `wss://testnet10-wrpc.kasia.fyi` (public wRPC, Borsh, NetworkId
+  Testnet-10). No local node. All four rothschild harness bins
+  (`create_vault_v2`, `fetch_tx_payload`, `spend_vault`, `vault_utxos`) ported
+  gRPC→wRPC — only the client-construction block changed; `RpcApi` trait calls
+  are identical, so the harness is transport-agnostic. No new crate deps
+  (`kaspa-wrpc-client` already in the workspace).
+- **utxoindex:** ON (confirmed — `get_utxos_by_addresses` returns the UTXO set).
+- **Block production:** live, ~10 BPS; virtual DAA advancing ~507.0M during the run.
+  Broadcasts confirmed by the public network (no local miner).
 
-## V4 — TODO
+### Results
+- **CREATION_TXID:** `7a64ee8e9cf260e808077b611caa3e3c6a84d0578bea51813dc2025139c097cf`
+  - vault P2SH output[0] `7a64ee8e…:0` = 5.0 TKAS; marker output[1] `7a64ee8e…:1`
+    = 0.5 TKAS; fee output[2] = 0.5 TKAS; VAULT_P2SH
+    `kaspatest:pze96w97nkryutp0jv7glxt5qup7nap0wev2mmd2en9vmu6vrjhngrs232uys`.
+- **Marker index:** 49 (root-key `(0, 49)`). Re-derived from the test seed alone;
+  MARKER_ADDR reproduced byte-exact → seed-only discovery.
+- **marker.outpoint.tx_id == CREATION_TXID:** **yes** (`7a64ee8e…` == `7a64ee8e…`).
+- **Confirmed-block payload round-trip byte-exact:** **yes.** `fetch_tx_payload`
+  found the tx via `get_blocks` block-scan (confirmed-block path, not mempool —
+  found at round 0 from the pre-broadcast sink cursor), payload == committed
+  (194 hex chars, discriminant 1 = D1, recovery/clawback SPKs exact).
+- **Rebuilt P2SH == output[0]:** **yes.** `--reconstruct-from-payload` on the
+  node-fetched payload + seed-derived owner (idx 0) → RECON_VAULT_SPK
+  `0000aa20b25d38be9d864e2c2f933c8f99740703e9f42f7658adedaacccacdf34c1caf3487`
+  == on-chain output[0] SPK (spendability proof).
 
-> Future work. Not implemented in this ticket.
+**V3 = PASS** (all five steps green).
 
-- _Threat / design TBD._
+> Prior vault `4fddcc27…` (first creation) confirmed on-chain but its block was
+> **pruned** (public node retains ~1.5 days of block bodies; the vault was ~2.2
+> days old — utxoindex still served its UTXOs). Block-scan payload fetch is
+> impossible against a pruned block, so a fresh vault (same seed/params →
+> identical VAULT_P2SH) was rebuilt to exercise the confirmed-block path.
+
+## V4 — on-chain seed-theft simulation (TESTNET-10)
+
+Rejects run first, against the unspent vault `7a64ee8e…:0`.
+
+- **Attacker address (seed-holder, non-destination):**
+  `kaspatest:qqkqrkprs5qvxs9xvxv67qwtve97rlgh2vdz3yk8eweravx65d29uwx8pddhn`.
+
+- **V4.1 — attacker clawback → attacker address: REJECTED.** Owner-signed with the
+  test seed, valid sig, adequate fee; only output[0] destination differs from
+  `clawback_spk`. Verbatim reason:
+  > Rejected transaction f74038ed…: **failed to verify the signature script:
+  > script ran, but verification failed**
+
+  This is a script/covenant-level failure — not fee, mempool policy, or malformed
+  sig (each of which surfaces a distinct error). Isolated as the **destination
+  constraint** by V4.3: same owner-key, redeem, and fee, differing **only** in the
+  sink address → V4.1 rejects, V4.3 accepts. The signature path therefore works;
+  the sole cause of the V4.1 rejection is the wrong destination.
+
+- **V4.2 — pre-delay withdraw → attacker address: REJECTED.** Withdraw branch, CSV
+  sequence = D1 (`002f0d` LE = 864000) vs UTXO age ~5.9k. Verbatim reason:
+  > Rejected transaction 75db3ce1…: **one of the transaction sequence locks
+  > conditions was not met**
+
+  (Relative-timelock rejection; destination is also wrong but consensus enforces
+  the sequence lock first.)
+
+- **V4.3 — legitimate clawback → real clawback address: ACCEPTED.**
+  - **CONTROL_TXID:** `36ea3d000bc1f35f8a616fe08980373dbac283a03e17bdd91a88b5d31b8bcf9e`
+  - Funds confirmed at clawback address
+    `kaspatest:qqr2k8jl0zrhwdgz7x7n6g8ljhdehlume7es2mk9649mw43myr9cktwm5vfdd`:
+    UTXO `36ea3d…:0` = 4.99 TKAS (5.0 − 0.01 fee), block_daa 507076737.
+  - Vault UTXO `7a64ee8e…:0` consumed (no longer in the P2SH UTXO set).
+
+**V4 = PASS** (V4.1 REJECTED for the destination constraint + V4.3 ACCEPTED).
+
+### Environment caveats
+- wRPC public endpoint `kasia.fyi` (no self-hosted node); TN10 **post-Toccata**
+  (non-empty native-subnetwork payload allowed, payload-aware sighash).
+- **KIP-9 storage mass:** every output must be ≳ 0.5 TKAS. A 0.01-TKAS output
+  gives mass 1e12/1e6 = 1.02M > the 500k limit (hard reject); creation used
+  `--fee-amount 50000000`.
+- **No txindex** on kaspad 2.0.1 → no get-tx-by-id for a confirmed tx. The
+  confirmed-block payload is fetched by `get_blocks` block-scan from the
+  pre-broadcast selected-chain sink; requires an **unpruned** block, so the fetch
+  must run within the node's retention window (~1.5 days here).
+- **D1 delay** (discriminant 1, 864000 DAA ≈ 1 day). T6Test (discriminant 0) is
+  codec-unmapped by design, so test-delay vaults are not payload-reconstructable;
+  V3/V4 use the production delay. Reconstruction uses the **default** build (not
+  `--features test-delay`).
+
+### Verdict
+
+**PASS** — seed-only discovery + confirmed-block reconstruction rebuild the
+spendable vault byte-exact, and the destination-locked clawback rejects theft to
+an attacker address while accepting recovery to the committed clawback
+destination. ADR-006 on-chain receipts above.
