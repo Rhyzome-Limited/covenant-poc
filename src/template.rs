@@ -27,6 +27,13 @@ const VAULT_V2_SIL: &str = include_str!(concat!(
     "/fixtures/kastle-vault-v2.sil"
 ));
 
+/// The fixed v3 vault template (ADR-007) — ONE committed destination that both
+/// branches pay. Only varying inputs are {owner, destinationSpk, delay}.
+const VAULT_V3_SIL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/kastle-vault-v3.sil"
+));
+
 /// Relative timelock in DAA-score units for a `days`-long window at `bps`
 /// blocks/second.
 ///
@@ -237,6 +244,39 @@ pub fn build_redeem_script_v2_from_parts(
 
     compile_contract(VAULT_V2_SIL, &args, CompileOptions::default())
         .expect("fixed v2 vault template must compile")
+        .script
+}
+
+/// The three varying inputs to the otherwise-fixed v3 vault script template.
+///
+/// v3 (ADR-007) replaces v2's two destinations with ONE: `destination_address`.
+/// Both clawback and withdraw pin output[0] to this address's SPK, so a stolen
+/// owner key can only move funds to the address the creator committed.
+pub struct VaultParamsV3 {
+    pub owner_pubkey: Vec<u8>,
+    pub destination_address: String,
+    pub delay: Delay,
+}
+
+/// Build the v3 vault redeem script — single committed destination — by
+/// compiling the fixed v3 template with the three params bound as constructor
+/// arguments.
+///
+/// Determinism: every byte is a pure function of {owner_pubkey,
+/// destination_address, delay} — template is constant, compiled in-process,
+/// same inputs → same bytes (ADR-005).
+pub fn build_redeem_script_v3(p: &VaultParamsV3) -> Vec<u8> {
+    // Constructor args, IN PARAMETER ORDER: (owner, destinationSpk, delay).
+    // destinationSpk is the real version||script SPK (see spk_bytes) so both
+    // `tx.outputs[0].scriptPubKey == destinationSpk` equalities can hold.
+    let args: Vec<Expr> = vec![
+        owner32(&p.owner_pubkey).into(),
+        spk_bytes(&p.destination_address).into(),
+        p.delay.relative_units().into(),
+    ];
+
+    compile_contract(VAULT_V3_SIL, &args, CompileOptions::default())
+        .expect("fixed v3 vault template must compile")
         .script
 }
 
