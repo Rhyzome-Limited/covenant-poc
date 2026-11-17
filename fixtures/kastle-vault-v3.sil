@@ -1,0 +1,40 @@
+// Kastle Vault v3 — Covenant++ (KIP-17 / SilverScript) vault redeem script.
+//
+// PRODUCT template kastle-vault-v3 (ADR-007, as amended 2026-11-10). It
+// SUPERSEDES the v2 two-destination template (fixtures/kastle-vault-v2.sil).
+// Do not confuse it with the repo's "V3" iteration: that was an on-chain
+// seed-only-recovery VALIDATION run of the v2 template, not a template version.
+//
+// INVARIANT: a stolen owner key cannot move vault funds to any address the
+// creator did not commit.
+//
+// The one change from v2: v2 committed TWO external destinations (withdraw paid
+// recoverySpk, clawback paid clawbackSpk). v3 commits ONE — destinationSpk — and
+// BOTH spend branches assert that same output script. No arbitrary withdraw, no
+// second address.
+//
+// A P2SH redeem script with TWO spend paths, selected at spend time:
+//
+//   clawback — owner-signed AND output[0] must pay destinationSpk. The pre-delay
+//              escape hatch; it can only move funds to the committed destination.
+//   withdraw — no signature, but only valid once the UTXO has aged past `delay`
+//              relative blocks AND output[0] pays destinationSpk.
+//
+// The ONLY varying inputs are the three constructor parameters:
+//   owner          — 32-byte x-only schnorr pubkey of the vault owner
+//   destinationSpk — the single committed target scriptPubKey (committed bytes)
+//   delay          — relative timelock in DAA/sequence units (see Delay enum)
+//
+// Everything else is constant, so {owner, destinationSpk, delay} fully determine
+// the redeem bytes and therefore the P2SH address (ADR-005 seed-completeness).
+contract KastleVaultV3(pubkey owner, byte[] destinationSpk, int delay) {
+    entrypoint function clawback(sig ownerSig) {
+        require(checkSig(ownerSig, owner));
+        require(tx.outputs[0].scriptPubKey == destinationSpk);
+    }
+
+    entrypoint function withdraw() {
+        require(this.age >= delay);
+        require(tx.outputs[0].scriptPubKey == destinationSpk);
+    }
+}

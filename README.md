@@ -34,6 +34,9 @@ to an attacker address fails *even with a valid owner signature* — while the
 ADR-005 seed-completeness invariant holds: the vault is rediscovered, rebuilt, and
 spent from the seed alone. ADR-006 (destination-locked clawback) validated on-chain.
 
+**Product template `kastle-vault-v3`** (ADR-007, single destination) is a new
+template, not the V3 row above — see [`V3_TEMPLATE.md`](V3_TEMPLATE.md).
+
 ## Layers (both modules in one crate)
 
 - `template` — **REAL** now. `build_redeem_script` compiles the fixed
